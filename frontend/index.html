@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Brain-First Model Tuning Toolkit</title>
+    <meta name="description" content="Neural-adaptive AI interface that synchronizes LLM responses with human emotional states through EEG and behavioral telemetry.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <!-- ── Header ── -->
+    <header id="app-header">
+        <div class="header-left">
+            <div class="logo-pulse"></div>
+            <h1>Brain-First <span class="accent">Model Tuning</span> Toolkit</h1>
+        </div>
+        <div class="header-right">
+            <div class="status-pill" id="connection-status">
+                <span class="dot"></span>
+                <span class="label">Connecting...</span>
+            </div>
+            <button id="btn-reset" class="btn-ghost" title="Reset all state">↻ Reset</button>
+        </div>
+    </header>
+
+    <!-- ── Main Grid ── -->
+    <main id="dashboard">
+        <!-- LEFT: Chat Panel -->
+        <section id="chat-panel" class="panel">
+            <div class="panel-header">
+                <h2>💬 Neural Chat</h2>
+                <span class="badge" id="chat-emotion-badge">neutral</span>
+            </div>
+            <div id="chat-messages" class="chat-messages">
+                <div class="message system-message fade-in">
+                    <p>Welcome to the Brain-First Toolkit. Your keystrokes and messages are being analyzed in real-time to adapt AI responses to your emotional state.</p>
+                    <p class="hint">Try typing something frustrated, happy, or anxious — watch how the AI adapts.</p>
+                </div>
+            </div>
+            <form id="chat-form" class="chat-input-area">
+                <textarea id="chat-input" placeholder="Type your message... (keystrokes are being captured)" rows="1" autocomplete="off"></textarea>
+                <button type="submit" id="btn-send" class="btn-primary">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2L11 13"/><path d="M22 2L15 22L11 13L2 9L22 2Z"/></svg>
+                </button>
+            </form>
+        </section>
+
+        <!-- RIGHT: Panels Stack -->
+        <div id="right-panels">
+            <!-- Emotion State -->
+            <section id="emotion-panel" class="panel">
+                <div class="panel-header">
+                    <h2>🧠 Emotional State</h2>
+                </div>
+                <div class="emotion-content">
+                    <div class="va-display">
+                        <div class="va-gauge" id="va-gauge">
+                            <div class="va-dot" id="va-dot"></div>
+                            <div class="va-axis-label va-top">Excited</div>
+                            <div class="va-axis-label va-bottom">Calm</div>
+                            <div class="va-axis-label va-left">Negative</div>
+                            <div class="va-axis-label va-right">Positive</div>
+                            <div class="va-crosshair"></div>
+                        </div>
+                        <div class="va-values">
+                            <div class="va-val"><span class="label">Valence</span><span class="value" id="val-valence">0.000</span></div>
+                            <div class="va-val"><span class="label">Arousal</span><span class="value" id="val-arousal">0.000</span></div>
+                            <div class="va-val"><span class="label">Zone</span><span class="value zone-tag" id="val-zone">neutral</span></div>
+                        </div>
+                    </div>
+                    <!-- Signal Sources -->
+                    <div class="signal-sources" id="signal-sources">
+                        <div class="signal-card" id="sig-text">
+                            <div class="signal-icon">📝</div>
+                            <div class="signal-label">Text</div>
+                            <div class="signal-emotion" id="sig-text-emotion">—</div>
+                            <div class="signal-conf-bar"><div class="conf-fill" id="sig-text-conf"></div></div>
+                        </div>
+                        <div class="signal-card" id="sig-keystroke">
+                            <div class="signal-icon">⌨️</div>
+                            <div class="signal-label">Keystroke</div>
+                            <div class="signal-emotion" id="sig-ks-emotion">—</div>
+                            <div class="signal-conf-bar"><div class="conf-fill" id="sig-ks-conf"></div></div>
+                        </div>
+                        <div class="signal-card" id="sig-eeg">
+                            <div class="signal-icon">🧠</div>
+                            <div class="signal-label">EEG</div>
+                            <div class="signal-emotion" id="sig-eeg-emotion">—</div>
+                            <div class="signal-conf-bar"><div class="conf-fill" id="sig-eeg-conf"></div></div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- LLM Adaptation -->
+            <section id="adaptation-panel" class="panel">
+                <div class="panel-header">
+                    <h2>⚡ LLM Adaptation</h2>
+                </div>
+                <div class="adaptation-grid">
+                    <div class="adapt-item">
+                        <span class="adapt-label">Tone</span>
+                        <span class="adapt-value" id="adapt-tone">balanced</span>
+                    </div>
+                    <div class="adapt-item">
+                        <span class="adapt-label">Temperature</span>
+                        <div class="adapt-bar-wrap">
+                            <div class="adapt-bar" id="adapt-temp-bar" style="width:70%"></div>
+                        </div>
+                        <span class="adapt-num" id="adapt-temp">0.7</span>
+                    </div>
+                    <div class="adapt-item">
+                        <span class="adapt-label">Memory Depth</span>
+                        <span class="adapt-value" id="adapt-memory">7 msgs</span>
+                    </div>
+                    <div class="adapt-item">
+                        <span class="adapt-label">Latency</span>
+                        <span class="adapt-value" id="adapt-latency">0 ms</span>
+                    </div>
+                </div>
+            </section>
+
+            <!-- EEG Simulator Controls -->
+            <section id="eeg-panel" class="panel">
+                <div class="panel-header">
+                    <h2>📡 EEG Simulator</h2>
+                    <div class="eeg-controls">
+                        <button id="btn-eeg-toggle" class="btn-sm btn-accent">Start</button>
+                    </div>
+                </div>
+                <div class="eeg-content">
+                    <div class="eeg-emotion-select">
+                        <label>Simulate emotion:</label>
+                        <select id="eeg-emotion-select">
+                            <option value="neutral">Neutral</option>
+                            <option value="joy">Joy</option>
+                            <option value="inspiration">Inspiration</option>
+                            <option value="tenderness">Tenderness</option>
+                            <option value="fear">Fear</option>
+                            <option value="disgust">Disgust</option>
+                            <option value="sadness">Sadness</option>
+                        </select>
+                    </div>
+                    <div class="eeg-wave-container" id="eeg-waves">
+                        <canvas id="eeg-canvas" width="400" height="160"></canvas>
+                    </div>
+                    <div class="eeg-prediction">
+                        <span class="label">Predicted:</span>
+                        <span class="value" id="eeg-predicted">—</span>
+                        <span class="conf" id="eeg-conf">—</span>
+                    </div>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <script src="app.js"></script>
+</body>
+</html>
