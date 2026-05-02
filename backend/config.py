@@ -14,25 +14,24 @@ MODELS_DIR = BASE_DIR / "models"
 DATA_DIR = BASE_DIR / "data"
 FRONTEND_DIR = BASE_DIR / "frontend"
 
-# ── API Keys ──
-# config.py (add these lines near other API keys)
-
-# ── Gemini API (replaces OpenAI) ──
+# ── Gemini API ──
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
 
-# ── Model file paths ──
-EEG_MODEL_PATH = MODELS_DIR / "eeg_emotion_model.pkl"
-EEG_SCALER_PATH = MODELS_DIR / "eeg_scaler.pkl"
-EEG_LABEL_ENCODER_7_PATH = MODELS_DIR / "eeg_label_encoder_7.pkl"
-EEG_LABEL_ENCODER_3_PATH = MODELS_DIR / "eeg_label_encoder_3.pkl"
+# ── Keystroke DL model paths (CNN-LSTM, 4-class) ──
+KEYSTROKE_DEPLOY_MODEL_PATH   = MODELS_DIR / "keystroke_deploy_model.pt"
+KEYSTROKE_SEQ_MEAN_PATH       = MODELS_DIR / "keystroke_seq_mean.npy"
+KEYSTROKE_SEQ_STD_PATH        = MODELS_DIR / "keystroke_seq_std.npy"
+KEYSTROKE_STAT_MEAN_PATH      = MODELS_DIR / "keystroke_stat_mean.npy"
+KEYSTROKE_STAT_STD_PATH       = MODELS_DIR / "keystroke_stat_std.npy"
+KEYSTROKE_LABEL_ENCODER_PATH  = MODELS_DIR / "keystroke_label_encoder.pkl"
+KEYSTROKE_USER_BASELINES_PATH = MODELS_DIR / "keystroke_user_baselines.pkl"
 
-KEYSTROKE_MODEL_PATH = MODELS_DIR / "keystroke_emotion_model.pkl"
-KEYSTROKE_SCALER_PATH = MODELS_DIR / "keystroke_scaler.pkl"
-KEYSTROKE_IMPUTER_PATH = MODELS_DIR / "keystroke_imputer.pkl"
-KEYSTROKE_LABEL_ENCODER_5_PATH = MODELS_DIR / "keystroke_label_encoder_5.pkl"
-KEYSTROKE_LABEL_ENCODER_3_PATH = MODELS_DIR / "keystroke_label_encoder_3.pkl"
-KEYSTROKE_FEATURE_COLS_PATH = MODELS_DIR / "keystroke_feature_cols.pkl"
+# ── Keystroke model constants (must match training) ──
+MAX_SEQ_LEN  = 100
+SEQ_FEAT_DIM = 12     # 7 timing + 4 key_type_onehot + 1 textType_flag
+STAT_DIM     = 21     # mean + std + median for 7 timing cols
+N_CLASSES    = 4
 
 # ── Emotion → Valence/Arousal mapping ──
 # Used by the fusion engine to convert discrete emotions to continuous space.
@@ -40,24 +39,23 @@ KEYSTROKE_FEATURE_COLS_PATH = MODELS_DIR / "keystroke_feature_cols.pkl"
 # Arousal: -1 (calm) to +1 (excited/agitated)
 
 EMOTION_VA_MAP = {
-    # EEG 7-class emotions
-    "joy":         {"valence":  0.8, "arousal":  0.7},
-    "inspiration": {"valence":  0.9, "arousal":  0.8},
-    "tenderness":  {"valence":  0.5, "arousal": -0.3},
-    "neutral":     {"valence":  0.0, "arousal":  0.0},
-    "sadness":     {"valence": -0.7, "arousal": -0.5},
-    "fear":        {"valence": -0.5, "arousal":  0.6},
-    "disgust":     {"valence": -0.8, "arousal":  0.3},
-    # Keystroke 5-class emotions
-    "happy":       {"valence":  0.8, "arousal":  0.7},
-    "calm":        {"valence":  0.4, "arousal": -0.5},
+    # Keystroke 4-class emotions (CNN-LSTM model)
+    "positive":    {"valence":  0.7, "arousal":  0.6},
     "angry":       {"valence": -0.6, "arousal":  0.9},
     "sad":         {"valence": -0.7, "arousal": -0.5},
-    # Text-derived (used by text_analyzer)
+    "neutral":     {"valence":  0.0, "arousal":  0.0},
+    # Facial expression emotions (DeepFace)
+    "happy":       {"valence":  0.8, "arousal":  0.7},
+    # Text-derived (used by text_analyzer / Gemini classifier)
     "frustration": {"valence": -0.6, "arousal":  0.8},
     "anxiety":     {"valence": -0.5, "arousal":  0.6},
     "curiosity":   {"valence":  0.3, "arousal":  0.4},
     "excitement":  {"valence":  0.9, "arousal":  0.9},
+    "joy":         {"valence":  0.8, "arousal":  0.7},
+    "sadness":     {"valence": -0.7, "arousal": -0.5},
+    "fear":        {"valence": -0.5, "arousal":  0.6},
+    "disgust":     {"valence": -0.8, "arousal":  0.3},
+    "anger":       {"valence": -0.6, "arousal":  0.9},
 }
 
 # ── LLM Adaptation profiles ──
@@ -111,4 +109,3 @@ SCALE_BLEND = 0.6      # 60% message-scale + 40% session-scale
 
 # Signals below this confidence are discarded entirely
 CONFIDENCE_THRESHOLD = 0.3
-

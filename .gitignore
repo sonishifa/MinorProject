@@ -1,3 +1,7 @@
 .env
 __pycache__/
 .DS_Store
+.venv
+.python-version
+ BFMT_Capstone_Snapshot (1).pptx
+ MinorProjectReport.pdf

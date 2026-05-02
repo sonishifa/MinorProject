@@ -1,196 +1,304 @@
 """
-Keystroke Emotion Engine — detects emotion from HOW the user types.
+Keystroke Emotion Engine — CNN-LSTM Deep Learning Model (4-class)
 
-Loads the trained Gradient Boosting model from Stage 2 (Kaggle).
-Accepts raw keystroke timing events from the frontend (keydown/keyup timestamps),
-computes the same aggregate features used during training, and predicts emotion.
+Loads the trained CNN-LSTM model from Kaggle and runs inference on
+raw keystroke events from the frontend.
+
+4 classes: positive | angry | sad | neutral
+
+Input: list of keystroke events with keyCode, keyDown, keyUp (seconds)
+Output: dict with emotion, valence, arousal, confidence, source
 """
 import numpy as np
+import torch
+import torch.nn as nn
 import joblib
 from config import (
-    KEYSTROKE_MODEL_PATH, KEYSTROKE_SCALER_PATH,
-    KEYSTROKE_IMPUTER_PATH, KEYSTROKE_LABEL_ENCODER_5_PATH,
-    KEYSTROKE_FEATURE_COLS_PATH, EMOTION_VA_MAP,
+    KEYSTROKE_DEPLOY_MODEL_PATH,
+    KEYSTROKE_SEQ_MEAN_PATH, KEYSTROKE_SEQ_STD_PATH,
+    KEYSTROKE_STAT_MEAN_PATH, KEYSTROKE_STAT_STD_PATH,
+    KEYSTROKE_LABEL_ENCODER_PATH,
+    KEYSTROKE_USER_BASELINES_PATH,
+    EMOTION_VA_MAP,
+    MAX_SEQ_LEN, SEQ_FEAT_DIM, STAT_DIM, N_CLASSES,
 )
 
-# ── Load model artifacts ──
+TIMING_COLS = ['D1U1', 'D1U2', 'D1D2', 'U1D2', 'U1U2', 'D1U3', 'D1D3']
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# CNN-LSTM Architecture — must exactly match training notebook
+# ══════════════════════════════════════════════════════════════════════════
+
+class CNN_LSTM(nn.Module):
+    def __init__(self, feat_dim=SEQ_FEAT_DIM, stat_dim=STAT_DIM,
+                 n_classes=N_CLASSES, drop=0.3):
+        super().__init__()
+        self.cnn = nn.Sequential(
+            nn.Conv1d(feat_dim, 64, 3, padding=1), nn.BatchNorm1d(64), nn.GELU(), nn.Dropout(drop * 0.5),
+            nn.Conv1d(64, 128, 5, padding=2), nn.BatchNorm1d(128), nn.GELU(),
+            nn.MaxPool1d(2), nn.Dropout(drop * 0.5),
+            nn.Conv1d(128, 128, 3, padding=1), nn.BatchNorm1d(128), nn.GELU(),
+        )
+        self.lstm1 = nn.LSTM(128, 128, num_layers=1, batch_first=True, bidirectional=True)
+        self.drop  = nn.Dropout(drop)
+        self.lstm2 = nn.LSTM(256, 128, num_layers=1, batch_first=True, bidirectional=True)
+        self.attn  = nn.Sequential(nn.Linear(256, 64), nn.Tanh(), nn.Linear(64, 1))
+        self.head  = nn.Sequential(
+            nn.Linear(256 + stat_dim, 128), nn.LayerNorm(128), nn.GELU(),
+            nn.Dropout(drop), nn.Linear(128, n_classes)
+        )
+
+    def forward(self, x, mask=None, stat=None):
+        out = self.cnn(x.permute(0, 2, 1)).permute(0, 2, 1)
+        out, _ = self.lstm1(out)
+        out = self.drop(out)
+        out, _ = self.lstm2(out)
+        scores = self.attn(out)
+        if mask is not None:
+            pool_mask = mask[:, ::2].unsqueeze(-1)
+            scores = scores.masked_fill(~pool_mask, float('-inf'))
+        ctx = (torch.softmax(scores, dim=1) * out).sum(1)
+        if stat is not None:
+            ctx = torch.cat([ctx, stat], dim=1)
+        return self.head(ctx)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Key-type one-hot encoding (must match training)
+# ══════════════════════════════════════════════════════════════════════════
+
+def keycode_to_type(keycode):
+    try:
+        kc = int(float(keycode))
+    except (ValueError, TypeError):
+        return 3
+    if (65 <= kc <= 90) or (97 <= kc <= 122): return 0  # alpha
+    if 48 <= kc <= 57 or 96 <= kc <= 105:     return 1  # digit
+    if kc in (32, 188, 190, 186, 222, 219, 221, 220, 191, 192, 189, 187):
+        return 2                                          # space/punct
+    return 3                                              # control/bksp
+
+def keycode_to_onehot(keycode):
+    oh = [0.0, 0.0, 0.0, 0.0]
+    oh[keycode_to_type(keycode)] = 1.0
+    return oh
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Load model artifacts — all at module level, never per-request
+# ══════════════════════════════════════════════════════════════════════════
+
+KS_AVAILABLE      = False
+ks_model          = None
+ks_label_encoder  = None
+ks_user_baselines = {}
+_GLOBAL_BASELINE  = np.zeros(7, dtype=np.float32)
+_SEQ_MEAN = _SEQ_STD = _STAT_MEAN = _STAT_STD = None
+
 try:
-    ks_model = joblib.load(KEYSTROKE_MODEL_PATH)
-    ks_scaler = joblib.load(KEYSTROKE_SCALER_PATH)
-    ks_imputer = joblib.load(KEYSTROKE_IMPUTER_PATH)
-    ks_label_encoder = joblib.load(KEYSTROKE_LABEL_ENCODER_5_PATH)
-    ks_feature_cols = joblib.load(KEYSTROKE_FEATURE_COLS_PATH)
+    _SEQ_MEAN  = np.load(str(KEYSTROKE_SEQ_MEAN_PATH))
+    _SEQ_STD   = np.load(str(KEYSTROKE_SEQ_STD_PATH))
+    _STAT_MEAN = np.load(str(KEYSTROKE_STAT_MEAN_PATH))
+    _STAT_STD  = np.load(str(KEYSTROKE_STAT_STD_PATH))
+
+    ks_label_encoder  = joblib.load(str(KEYSTROKE_LABEL_ENCODER_PATH))
+    ks_user_baselines = joblib.load(str(KEYSTROKE_USER_BASELINES_PATH))
+
+    # Global baseline = mean of all training users' personal baselines.
+    # Used for users not in the training set so their timing features
+    # stay in the same deviation range (~±30ms) as training data.
+    # Falling back to zeros would feed raw absolute values (~100ms) into
+    # a model trained on deviations — guaranteed OOD stats.
+    if ks_user_baselines:
+        _GLOBAL_BASELINE = np.array(
+            list(ks_user_baselines.values()), dtype=np.float32
+        ).mean(0)
+
+    ks_model = CNN_LSTM()
+    state_dict = torch.load(str(KEYSTROKE_DEPLOY_MODEL_PATH), map_location='cpu')
+    ks_model.load_state_dict(state_dict)
+    ks_model.eval()
+
     KS_AVAILABLE = True
-    print(f"[KeystrokeEngine] Loaded model with {len(ks_feature_cols)} features, "
-          f"classes: {list(ks_label_encoder.classes_)}")
+    print(f"[KeystrokeEngine] CNN-LSTM loaded — classes: {list(ks_label_encoder.classes_)}")
+    print(f"[KeystrokeEngine] Global baseline from {len(ks_user_baselines)} training users")
+
 except Exception as e:
     print(f"[KeystrokeEngine] Model not available: {e}")
-    KS_AVAILABLE = False
 
 
-# ── The timing feature names we compute (must match training) ──
-TIMING_NAMES = ["D1U1", "D1U2", "D1D2", "U1D2", "U1U2", "D1U3", "D1D3"]
+# ══════════════════════════════════════════════════════════════════════════
+# Background Calibration (Learning user's pattern over time)
+# ══════════════════════════════════════════════════════════════════════════
 
-
-def compute_keystroke_features(events: list[dict]) -> dict | None:
+def update_rolling_baseline(uid: str, timing_rows: list, alpha: float = 0.15):
     """
-    Compute aggregate features from raw keystroke events.
-
-    Args:
-        events: list of dicts, each with keys:
-            - keyCode: int
-            - keyDown: float (timestamp in ms)
-            - keyUp: float (timestamp in ms)
-
-    Returns:
-        dict of features matching training format, or None if insufficient data.
+    Incrementally updates the user's personal baseline using an Exponential Moving Average (EMA).
+    This allows the system to slowly 'learn' the user's natural typing speed in the background.
     """
-    if len(events) < 5:
-        return None
+    if uid not in ks_user_baselines:
+        ks_user_baselines[uid] = _GLOBAL_BASELINE.copy()
 
-    # ── Compute timing features from raw events ──
-    # D1U1 = key hold duration (keyUp - keyDown for same key)
-    # D1D2 = time between consecutive keyDowns
-    # U1D2 = time between keyUp of key1 and keyDown of key2 (flight time)
-    # D1U2 = time between keyDown of key1 and keyUp of key2
-    # U1U2 = time between consecutive keyUps
-    # D1U3, D1D3 = trigraph timings (span 3 keys)
+    if not timing_rows:
+        return
 
-    timings = {name: [] for name in TIMING_NAMES}
+    batch_timings = []
+    for row in timing_rows:
+        batch_timings.append([row.get(col, 0.0) for col in TIMING_COLS])
+    
+    batch_timings = np.array(batch_timings, dtype=np.float32)
+    batch_median = np.median(batch_timings, axis=0)
 
+    current_baseline = ks_user_baselines[uid]
+    ks_user_baselines[uid] = (1.0 - alpha) * current_baseline + alpha * batch_median
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Timing feature computation
+# ══════════════════════════════════════════════════════════════════════════
+
+def compute_timing_features(events: list) -> list:
+    """
+    Convert raw keystroke events into per-keystroke timing rows.
+
+    Frontend sends keyDown/keyUp in SECONDS (normalised from first keydown).
+    Training data uses MILLISECONDS — multiply by 1000 here.
+    """
+    rows = []
     for i, evt in enumerate(events):
-        # D1U1: dwell time (how long key is held)
-        if "keyDown" in evt and "keyUp" in evt:
-            timings["D1U1"].append(evt["keyUp"] - evt["keyDown"])
+        kd = evt.get("keyDown", 0) * 1000.0
+        ku = evt.get("keyUp",   0) * 1000.0
+        kc = evt.get("keyCode", 0)
 
-        # Digraph features (between consecutive keys)
+        row = {"keyCode": kc, "textType": "free", "D1U1": ku - kd}
+
         if i > 0:
-            prev = events[i - 1]
-            timings["D1D2"].append(evt["keyDown"] - prev["keyDown"])
-            timings["D1U2"].append(evt["keyUp"] - prev["keyDown"])
-            timings["U1D2"].append(evt["keyDown"] - prev["keyUp"])
-            timings["U1U2"].append(evt["keyUp"] - prev["keyUp"])
-
-        # Trigraph features (span 3 keys)
-        if i > 1:
-            prev2 = events[i - 2]
-            timings["D1D3"].append(evt["keyDown"] - prev2["keyDown"])
-            timings["D1U3"].append(evt["keyUp"] - prev2["keyDown"])
-
-    # ── Aggregate into statistics (matching training) ──
-    features = {}
-    for name in TIMING_NAMES:
-        data = np.array(timings[name], dtype=float)
-        data = data[np.isfinite(data)]  # remove any Inf/NaN
-
-        if len(data) < 3:
-            for stat in ["mean", "std", "median", "q25", "q75", "iqr"]:
-                features[f"{name}_{stat}"] = np.nan
+            prev_kd = events[i-1].get("keyDown", 0) * 1000.0
+            prev_ku = events[i-1].get("keyUp",   0) * 1000.0
+            row["D1D2"] = kd - prev_kd
+            row["D1U2"] = ku - prev_kd
+            row["U1D2"] = kd - prev_ku
+            row["U1U2"] = ku - prev_ku
         else:
-            features[f"{name}_mean"] = float(np.mean(data))
-            features[f"{name}_std"] = float(np.std(data))
-            features[f"{name}_median"] = float(np.median(data))
-            features[f"{name}_q25"] = float(np.percentile(data, 25))
-            features[f"{name}_q75"] = float(np.percentile(data, 75))
-            features[f"{name}_iqr"] = float(np.percentile(data, 75) - np.percentile(data, 25))
+            row["D1D2"] = row["D1U2"] = row["U1D2"] = row["U1U2"] = 0.0
 
-    # ── Derived features ──
-    d1d2 = np.array(timings["D1D2"], dtype=float)
-    d1d2 = d1d2[np.isfinite(d1d2)]
-    d1u1 = np.array(timings["D1U1"], dtype=float)
-    d1u1 = d1u1[np.isfinite(d1u1)]
-    u1d2 = np.array(timings["U1D2"], dtype=float)
-    u1d2 = u1d2[np.isfinite(u1d2)]
+        if i > 1:
+            prev2_kd   = events[i-2].get("keyDown", 0) * 1000.0
+            row["D1U3"] = ku - prev2_kd
+            row["D1D3"] = kd - prev2_kd
+        else:
+            row["D1U3"] = row["D1D3"] = 0.0
 
-    # Typing speed
-    features["typing_speed"] = float(1.0 / np.mean(d1d2)) if len(d1d2) > 0 and np.mean(d1d2) > 0 else np.nan
-
-    # Rhythm regularity (CV of inter-key intervals)
-    features["rhythm_cv"] = float(np.std(d1d2) / np.mean(d1d2)) if len(d1d2) > 2 and np.mean(d1d2) > 0 else np.nan
-
-    # Dwell-to-flight ratio
-    if len(d1u1) > 0 and len(u1d2) > 0 and abs(np.mean(u1d2)) > 1e-8:
-        features["dwell_flight_ratio"] = float(np.mean(d1u1) / (abs(np.mean(u1d2)) + 1e-8))
-    else:
-        features["dwell_flight_ratio"] = np.nan
-
-    # Keystroke count
-    features["n_keystrokes"] = float(len(events))
-
-    # Error-related (count delete/backspace keys: keyCodes 8 and 46)
-    delete_count = sum(1 for e in events if e.get("keyCode") in [8, 46])
-    features["DelFreq"] = float(delete_count / len(events)) if len(events) > 0 else 0.0
-    features["LeftFreq"] = 0.0  # Backspace is already counted in DelFreq
-    features["TotTime"] = float(events[-1].get("keyUp", 0) - events[0].get("keyDown", 0)) if len(events) > 1 else 0.0
-    features["error_ratio"] = features["DelFreq"] + features["LeftFreq"]
-
-    return features
+        rows.append(row)
+    return rows
 
 
-def predict_keystroke_emotion(events: list[dict]) -> dict:
+# ══════════════════════════════════════════════════════════════════════════
+# Inference sequence builder (matches training notebook exactly)
+# ══════════════════════════════════════════════════════════════════════════
+
+def build_inference_sequence(timing_rows: list, uid: str = "default") -> tuple:
     """
-    Predict emotion from keystroke events.
+    Returns:
+        seq  (1, 100, 12) float32 — normalised calibrated padded sequence
+        mask (1, 100)     bool    — True=real key, False=padding
+        stat (1, 21)      float32 — mean/std/median of timing cols
+    """
+    baseline = ks_user_baselines.get(uid, _GLOBAL_BASELINE)
+
+    rows = []
+    for ev in timing_rows:
+        row = [float(ev.get(col, 0.0)) - float(baseline[i])
+               for i, col in enumerate(TIMING_COLS)]
+        row.extend(keycode_to_onehot(ev.get("keyCode", 0)))
+        row.append(1.0 if ev.get("textType", "free") == "free" else 0.0)
+        rows.append(row)
+
+    seq  = np.nan_to_num(np.clip(np.array(rows, np.float32), -500, 500))
+    n    = seq.shape[0]
+    mask = np.zeros(MAX_SEQ_LEN, dtype=bool)
+    mask[:min(n, MAX_SEQ_LEN)] = True
+
+    if n >= MAX_SEQ_LEN:
+        seq = seq[:MAX_SEQ_LEN]
+    else:
+        seq = np.vstack([seq, np.zeros((MAX_SEQ_LEN - n, SEQ_FEAT_DIM), np.float32)])
+
+    # Stat features from raw calibrated values — BEFORE normalisation.
+    # _STAT_MEAN/_STAT_STD were fitted on pre-norm values; computing
+    # stats after normalisation would produce a distribution mismatch.
+    real_timing = seq[mask, :7]
+    stat = np.zeros(STAT_DIM, dtype=np.float32)
+    if len(real_timing) > 0:
+        stat[:7]    = real_timing.mean(0)
+        stat[7:14]  = real_timing.std(0)
+        stat[14:21] = np.median(real_timing, axis=0)
+
+    seq[mask] = (seq[mask] - _SEQ_MEAN) / (_SEQ_STD  + 1e-8)
+    stat      = (stat      - _STAT_MEAN) / (_STAT_STD + 1e-8)
+
+    return seq[np.newaxis], mask[np.newaxis], stat[np.newaxis]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Main prediction entry point
+# ══════════════════════════════════════════════════════════════════════════
+
+def predict_keystroke_emotion(events: list, uid: str = "live_user", update_baseline: bool = True) -> dict:
+    """
+    Predict emotion from raw keystroke events sent by the frontend.
 
     Args:
-        events: list of keystroke event dicts from the frontend
+        events: list of dicts, each with keyCode (int),
+                keyDown and keyUp (float, seconds from first keydown)
 
     Returns:
-        dict with keys: emotion, valence, arousal, confidence, source
+        signal dict compatible with fusion.py
     """
     if not KS_AVAILABLE:
         return _neutral_result("keystroke_unavailable")
 
-    features = compute_keystroke_features(events)
-    if features is None:
+    valid = [e for e in events if e.get("keyUp") is not None]
+    if len(valid) < 5:
         return _neutral_result("keystroke_insufficient_data")
 
-    # ── Build feature vector in the same order as training ──
-    feature_vector = []
-    for col in ks_feature_cols:
-        feature_vector.append(features.get(col, np.nan))
+    timing_rows = compute_timing_features(valid)
+    
+    if update_baseline:
+        update_rolling_baseline(uid, timing_rows)
 
-    X = np.array([feature_vector], dtype=np.float64)
+    seq, mask, stat = build_inference_sequence(timing_rows, uid)
 
-    # Impute missing values (same as training)
-    X = ks_imputer.transform(X)
-    X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+    with torch.no_grad():
+        logits = ks_model(
+            torch.tensor(seq,  dtype=torch.float32),
+            torch.tensor(mask, dtype=torch.bool),
+            torch.tensor(stat, dtype=torch.float32),
+        )
 
-    # Scale
-    X = ks_scaler.transform(X)
+    probs      = torch.softmax(logits, dim=-1).squeeze().numpy()
+    pred_idx   = int(probs.argmax())
+    emotion    = ks_label_encoder.inverse_transform([pred_idx])[0]
+    confidence = float(probs[pred_idx])
 
-    # Predict
-    prediction = ks_model.predict(X)[0]
-    emotion = ks_label_encoder.inverse_transform([prediction])[0]
-
-    # Get confidence from probability estimates if available
-    if hasattr(ks_model, "predict_proba"):
-        probas = ks_model.predict_proba(X)[0]
-        confidence = float(np.max(probas))
-    else:
-        confidence = 0.5
-
-    # Map to valence/arousal
-    va = EMOTION_VA_MAP.get(emotion, {"valence": 0.0, "arousal": 0.0})
+    va           = EMOTION_VA_MAP.get(emotion, {"valence": 0.0, "arousal": 0.0})
+    delete_count = sum(1 for e in valid if e.get("keyCode") in [8, 46])
 
     return {
-        "emotion": emotion,
-        "valence": va["valence"],
-        "arousal": va["arousal"],
-        "confidence": confidence,
-        "source": "keystroke",
-        # Data quality metadata for dynamic confidence
-        "n_keystrokes": len(events),
-        "error_ratio": features.get("error_ratio", 0.0),
+        "emotion":      emotion,
+        "valence":      va["valence"],
+        "arousal":      va["arousal"],
+        "confidence":   confidence,
+        "source":       "keystroke",
+        "n_keystrokes": len(valid),
+        "error_ratio":  delete_count / len(valid),
     }
 
 
 def _neutral_result(source: str = "keystroke") -> dict:
     return {
-        "emotion": "neutral",
-        "valence": 0.0,
-        "arousal": 0.0,
-        "confidence": 0.2,
-        "source": source,
-        "n_keystrokes": 0,
-        "error_ratio": 0.0,
+        "emotion": "neutral", "valence": 0.0, "arousal": 0.0,
+        "confidence": 0.2, "source": source,
+        "n_keystrokes": 0, "error_ratio": 0.0,
     }
